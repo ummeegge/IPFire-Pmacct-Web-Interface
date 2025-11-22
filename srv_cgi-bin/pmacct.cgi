@@ -2,30 +2,25 @@
 #===============================================================================
 # pmacct.cgi – Live NetFlow/sFlow Traffic Accounting for IPFire
 #
-# Provides a real-time top-talker view using pmacct's memory plugin.
 # Features:
-# - Human-readable byte counters (KB, MB, GB, TB)
-# - IPFire zone coloring (GREEN, BLUE, ORANGE, RED, VPN, WireGuard, OpenVPN)
-# - Clickable IPs open ipinfo.cgi in a new tab
-# - Column-based search (including "All columns")
-# - Client-side sorting and pagination
-# - Live refresh (2/5/10 seconds or off)
-# - Pure IPFire look & feel – no external libraries
-# - CSV export button
-# - Maximum 1000 flows (fast & browser-friendly)
-# - Cached network sorting (performance)
-# - Full HTML escaping including single quotes (XSS-safe)
-#
-# Requirements:
-# - pmacct with memory plugin enabled and writing to /var/spool/pmacct/plugin1.pipe
-# - Standard IPFire Perl environment
+# - Human-readable byte counters
+# - Full IPFire zone coloring (including WireGuard/OpenVPN etc.)
+# - Clickable IPs → ipinfo.cgi
+# - Live refresh, client-side search/sorting/pagination
+# - Natural IPv4 sorting (2.x comes before 95.x – finally!)
+# - Search "All columns" without false positives across borders
+# - CSV export
+# - Full XSS protection including single quotes
+# - Maximum 1000 flows, cached network list, bulletproof error handling
 #
 # Author: ummeegge
-# License: GPL-3.0 (same as IPFire)
+# Version: 0.8.1
+# License: GPL-3.0
 #===============================================================================
 use strict;
 use warnings;
 no warnings 'once';
+
 use CGI qw(:standard);
 use JSON::PP qw(encode_json);
 
@@ -46,10 +41,16 @@ my %networks = (
     "224.0.0.0/4"       => "#A0A0A0",  # Multicast
 );
 
-# Local zones
-$networks{"$mainsettings{'GREEN_NETADDRESS'}/$mainsettings{'GREEN_NETMASK'}"} = ${Header::colourgreen} if $mainsettings{'GREEN_NETADDRESS'};
-$networks{"$mainsettings{'BLUE_NETADDRESS'}/$mainsettings{'BLUE_NETMASK'}"}   = ${Header::colourblue}   if $mainsettings{'BLUE_NETADDRESS'};
-$networks{"$mainsettings{'ORANGE_NETADDRESS'}/$mainsettings{'ORANGE_NETMASK'}"} = ${Header::colourorange} if $mainsettings{'ORANGE_NETADDRESS'};
+# Local zones (GREEN, BLUE, ORANGE)
+if ($mainsettings{'GREEN_NETADDRESS'}) {
+    $networks{"$mainsettings{'GREEN_NETADDRESS'}/$mainsettings{'GREEN_NETMASK'}"} = ${Header::colourgreen};
+}
+if ($mainsettings{'BLUE_NETADDRESS'}) {
+    $networks{"$mainsettings{'BLUE_NETADDRESS'}/$mainsettings{'BLUE_NETMASK'}"} = ${Header::colourblue};
+}
+if ($mainsettings{'ORANGE_NETADDRESS'}) {
+    $networks{"$mainsettings{'ORANGE_NETADDRESS'}/$mainsettings{'ORANGE_NETMASK'}"} = ${Header::colourorange};
+}
 
 # RED interface + aliases
 my $red = &IDS::get_red_address();
@@ -60,13 +61,14 @@ foreach my $alias (&IDS::get_aliases()) {
 
 # VPN / OpenVPN / WireGuard subnets
 if (-e "/var/ipfire/vpn/config") {
-    open(my $fh, "<", "/var/ipfire/vpn/config") or warn "Cannot open vpn/config: $!";
-    while (<$fh>) {
-        my @vpn = split(/,/, $_);
-        my @subnets = split(/\|/, $vpn[12] // '');
-        $networks{$_} = ${Header::colourvpn} for grep {$_} @subnets;
+    if (open(my $fh, "<", "/var/ipfire/vpn/config")) {
+        while (<$fh>) {
+            my @vpn = split(/,/, $_);
+            my @subnets = split(/\|/, $vpn[12] // '');
+            $networks{$_} = ${Header::colourvpn} for grep {$_} @subnets;
+        }
+        close($fh);
     }
-    close($fh) if $fh;
 }
 if (-e "/var/ipfire/ovpn/settings") {
     my %ovpn = ();
@@ -79,22 +81,24 @@ if (-e "/var/ipfire/wireguard/settings") {
     $networks{$wg{'CLIENT_POOL'}} = ${Header::colourwg} if $wg{'CLIENT_POOL'};
 }
 
-# Cached sorted network list (longest prefix first)
+# Cached sorted network list – longest prefix first (most specific match wins)
 my @sorted_networks = sort { &Network::get_prefix($b) <=> &Network::get_prefix($a) } keys %networks;
 
-# Return the correct background colour for a given IP (fast & safe)
+# Return background colour for a given IP – fast thanks to cached sorting
 sub ipcolour {
     my $ip = shift // return ${Header::colourred};
+
+    # Quick IPv4 validation
     return ${Header::colourred} unless $ip =~ /^\d{1,3}(\.\d{1,3}){3}$/;
 
     foreach my $net (@sorted_networks) {
         next unless &Network::check_subnet($net);
         return $networks{$net} if &Network::ip_address_in_network($ip, $net);
     }
-    return ${Header::colourred}; # Internet (RED)
+    return ${Header::colourred}; # Everything else = Internet (RED)
 }
 
-# Ultimate HTML escape – escapes single quotes too
+# Full HTML entity escaping – including single quotes (XSS-safe)
 sub html_escape {
     my $text = shift // '';
     $text =~ s/&/&amp;/g;
@@ -110,7 +114,6 @@ sub html_escape {
 # ---------------------------------------------------------------------------
 my $q = CGI->new;
 
-# AJAX endpoint
 if ($q->param('action') && $q->param('action') eq 'get_data') {
     print $q->header(-type => 'application/json', -charset => 'utf-8');
     my $data = get_pmacct_data();
@@ -211,21 +214,39 @@ function updatePagination(totalRows) {
 
 function renderTable() {
     if (!tableMeta || allRows.length === 0) {
-        \$('#tablecontainer').html('<p style="text-align:center;color:red;">No data available</p>');
+        \$('#tablecontainer').html('<p style="text-align:center;color:red;">No data available – pmacct daemon not running or pipe empty</p>');
         \$('#pagination').empty();
         return;
     }
 
+    // === SORTING: natural IPv4 → numeric → string ===
     if (currentSortCol !== null) {
         allRows.sort((a, b) => {
-            const A = rawData[a.idx][currentSortCol];
-            const B = rawData[b.idx][currentSortCol];
+            let A = rawData[a.idx][currentSortCol];
+            let B = rawData[b.idx][currentSortCol];
+
+            // Natural IPv4 sorting for IP columns
+            if (currentSortCol === tableMeta.src_ip_col || currentSortCol === tableMeta.dst_ip_col) {
+                const ipToNum = ip => ip.split('.').map(o => parseInt(o, 10) || 0);
+                const arrA = ipToNum(A);
+                const arrB = ipToNum(B);
+                for (let i = 0; i < 4; i++) {
+                    if (arrA[i] !== arrB[i]) {
+                        return (arrA[i] - arrB[i]) * (currentSortAsc ? 1 : -1);
+                    }
+                }
+                return 0;
+            }
+
+            // Numeric sorting
             const numA = Number(A);
             const numB = Number(B);
             if (!isNaN(numA) && !isNaN(numB)) {
                 return (numA - numB) * (currentSortAsc ? 1 : -1);
             }
-            return (A.localeCompare(B)) * (currentSortAsc ? 1 : -1);
+
+            // String fallback
+            return A.localeCompare(B) * (currentSortAsc ? 1 : -1);
         });
     }
 
@@ -247,7 +268,7 @@ function renderTable() {
             let content = cell || ' ';
             let bg = '';
 
-            // Defense-in-depth JS escaping
+            // Defense-in-depth escaping
             content = content.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 
             if (tableMeta.src_ip_col >= 0 && tableMeta.dst_ip_col >= 0 &&
@@ -274,16 +295,29 @@ function renderTable() {
 
 function applySearchOnPage() {
     const term = lastSearchTerm.toLowerCase();
-    const col = parseInt(lastSearchCol);
     if (term === '') {
         \$('#tablecontainer tbody tr').show();
         return;
     }
+
+    const col = parseInt(lastSearchCol);
+
     \$('#tablecontainer tbody tr').each(function() {
-        let show = (col === -1)
-            ? \$(this).text().toLowerCase().indexOf(term) !== -1
-            : \$(this).children('td').eq(col).text().toLowerCase().indexOf(term) !== -1;
-        \$(this).toggle(show);
+        const \$row = \$(this);
+        let show = false;
+
+        if (col === -1) {
+            \$row.children('td').each(function() {
+                if (\$(this).text().toLowerCase().indexOf(term) !== -1) {
+                    show = true;
+                    return false;
+                }
+            });
+        } else {
+            show = \$row.children('td').eq(col).text().toLowerCase().indexOf(term) !== -1;
+        }
+
+        \$row.toggle(show);
     });
 }
 
@@ -326,33 +360,19 @@ function loadData() {
     })
     .fail(function() {
         \$('#status').html('<span style="color:red;">Error loading data</span>');
-        \$('#tablecontainer').html('<p style="text-align:center;color:red;">pmacct data not available (pipe empty or daemon not running)</p>');
+        \$('#tablecontainer').html('<p style="text-align:center;color:red;">pmacct data not available (daemon not running or pipe empty)</p>');
     });
 }
 
-// Event handlers – classic functions so 'this' works correctly
-\$('#pageSize').on('change', function() {
-    pageSize = parseInt(this.value) || 0;
-    currentPage = 1;
-    renderTable();
-});
-
-\$('#search').on('input', function() {
-    lastSearchTerm = this.value.trim();
-    applySearchOnPage();
-});
-
-\$('#searchColumn').on('change', function() {
-    lastSearchCol = this.value;
-    applySearchOnPage();
-});
-
+// Classic jQuery handlers – proper 'this' binding guaranteed
+\$('#pageSize').on('change', function() { pageSize = parseInt(this.value) || 0; currentPage = 1; renderTable(); });
+\$('#search').on('input', function() { lastSearchTerm = this.value.trim(); applySearchOnPage(); });
+\$('#searchColumn').on('change', function() { lastSearchCol = this.value; applySearchOnPage(); });
 \$('#refresh').on('change', function() {
     clearInterval(refreshInterval);
     const sec = parseInt(this.value);
     if (sec > 0) refreshInterval = setInterval(loadData, sec * 1000);
 });
-
 \$('#manualRefresh').on('click', loadData);
 \$('#exportCsv').on('click', exportToCSV);
 
@@ -406,7 +426,6 @@ sub get_pmacct_data {
         $dst_ip_col  = $i if $headers[$i] =~ /DST.*(IP|HOST)/i;
     }
 
-    # Limit to maximum 1000 data rows
     @lines = splice(@lines, 0, 1000) if @lines > 1000;
 
     my @rows       = ();
@@ -422,7 +441,7 @@ sub get_pmacct_data {
         my @raw     = @fields;
 
         if ($bytes_col >= 0 && $fields[$bytes_col] =~ /^\d+$/) {
-            $display[$bytes_col] = html_escape( &General::formatBytes($fields[$bytes_col]) );
+            $display[$bytes_col] = html_escape(&General::formatBytes($fields[$bytes_col]));
         }
 
         my $src_colour = ($src_ip_col >= 0) ? ipcolour($fields[$src_ip_col] // '') : ${Header::colourred};
