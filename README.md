@@ -56,4 +56,4 @@ Ideas for future enhancements:
 
 GNU General Public License v3.0 (same as IPFire)
 
-Made with ❤️ by the IPFire community
+Made with ❤️ for the IPFire community
