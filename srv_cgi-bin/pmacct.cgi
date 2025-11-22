@@ -11,19 +11,21 @@
 # - Client-side sorting and pagination
 # - Live refresh (2/5/10 seconds or off)
 # - Pure IPFire look & feel – no external libraries
+# - CSV export button
+# - Maximum 1000 flows (fast & browser-friendly)
+# - Cached network sorting (performance)
+# - Full HTML escaping including single quotes (XSS-safe)
 #
 # Requirements:
 # - pmacct with memory plugin enabled and writing to /var/spool/pmacct/plugin1.pipe
 # - Standard IPFire Perl environment
 #
-# Author:  [Your Name] + community contributions welcome!
+# Author: ummeegge
 # License: GPL-3.0 (same as IPFire)
 #===============================================================================
-
 use strict;
 use warnings;
-no warnings 'once';    # Standard in IPFire CGIs to suppress "used only once" warnings
-
+no warnings 'once';
 use CGI qw(:standard);
 use JSON::PP qw(encode_json);
 
@@ -31,22 +33,23 @@ require '/var/ipfire/general-functions.pl';
 require '/var/ipfire/header.pl';
 require '/var/ipfire/lang.pl';
 require '/var/ipfire/ids-functions.pl';
+require '/var/ipfire/network-functions.pl';
 
 # ---------------------------------------------------------------------------
-# Build zone-to-color mapping (identical to connections.cgi)
+# Build zone-to-color mapping – cached sorted list for performance
 # ---------------------------------------------------------------------------
 my %mainsettings = ();
 &General::readhash("/var/ipfire/ethernet/settings", \%mainsettings);
 
 my %networks = (
-    "127.0.0.0/8" => ${Header::colourfw},
-    "224.0.0.0/3" => "#A0A0A0",     # Multicast
+    "127.0.0.0/8"       => ${Header::colourfw},
+    "224.0.0.0/4"       => "#A0A0A0",  # Multicast
 );
 
 # Local zones
-$networks{"$mainsettings{'GREEN_NETADDRESS'}/$mainsettings{'GREEN_NETMASK'}"}   = ${Header::colourgreen}   if $mainsettings{'GREEN_NETADDRESS'};
-$networks{"$mainsettings{'BLUE_NETADDRESS'}/$mainsettings{'BLUE_NETMASK'}"}     = ${Header::colourblue}     if $mainsettings{'BLUE_NETADDRESS'};
-$networks{"$mainsettings{'ORANGE_NETADDRESS'}/$mainsettings{'ORANGE_NETMASK'}"} = ${Header::colourorange}   if $mainsettings{'ORANGE_NETADDRESS'};
+$networks{"$mainsettings{'GREEN_NETADDRESS'}/$mainsettings{'GREEN_NETMASK'}"} = ${Header::colourgreen} if $mainsettings{'GREEN_NETADDRESS'};
+$networks{"$mainsettings{'BLUE_NETADDRESS'}/$mainsettings{'BLUE_NETMASK'}"}   = ${Header::colourblue}   if $mainsettings{'BLUE_NETADDRESS'};
+$networks{"$mainsettings{'ORANGE_NETADDRESS'}/$mainsettings{'ORANGE_NETMASK'}"} = ${Header::colourorange} if $mainsettings{'ORANGE_NETADDRESS'};
 
 # RED interface + aliases
 my $red = &IDS::get_red_address();
@@ -76,15 +79,30 @@ if (-e "/var/ipfire/wireguard/settings") {
     $networks{$wg{'CLIENT_POOL'}} = ${Header::colourwg} if $wg{'CLIENT_POOL'};
 }
 
-# Return the correct background colour for a given IP
+# Cached sorted network list (longest prefix first)
+my @sorted_networks = sort { &Network::get_prefix($b) <=> &Network::get_prefix($a) } keys %networks;
+
+# Return the correct background colour for a given IP (fast & safe)
 sub ipcolour {
     my $ip = shift // return ${Header::colourred};
+    return ${Header::colourred} unless $ip =~ /^\d{1,3}(\.\d{1,3}){3}$/;
 
-    foreach my $net (sort { &Network::get_prefix($b) <=> &Network::get_prefix($a) } keys %networks) {
+    foreach my $net (@sorted_networks) {
         next unless &Network::check_subnet($net);
         return $networks{$net} if &Network::ip_address_in_network($ip, $net);
     }
-    return ${Header::colourred};   # Internet (RED)
+    return ${Header::colourred}; # Internet (RED)
+}
+
+# Ultimate HTML escape – escapes single quotes too
+sub html_escape {
+    my $text = shift // '';
+    $text =~ s/&/&amp;/g;
+    $text =~ s/</&lt;/g;
+    $text =~ s/>/&gt;/g;
+    $text =~ s/"/&quot;/g;
+    $text =~ s/'/&#39;/g;
+    return $text;
 }
 
 # ---------------------------------------------------------------------------
@@ -92,7 +110,7 @@ sub ipcolour {
 # ---------------------------------------------------------------------------
 my $q = CGI->new;
 
-# AJAX endpoint – returns all data (frontend handles pagination)
+# AJAX endpoint
 if ($q->param('action') && $q->param('action') eq 'get_data') {
     print $q->header(-type => 'application/json', -charset => 'utf-8');
     my $data = get_pmacct_data();
@@ -106,7 +124,6 @@ if ($q->param('action') && $q->param('action') eq 'get_data') {
 &Header::showhttpheaders();
 &Header::openpage('pmacct Traffic Accounting', 1, '');
 &Header::openbigbox('100%', 'left', '');
-
 &Header::openbox('100%', 'left', 'pmacct Live Traffic Accounting');
 
 print qq{
@@ -139,6 +156,7 @@ print qq{
   </td>
   <td width="20%" align="right">
     <input type="button" id="manualRefresh" value="Refresh now" />
+    <input type="button" id="exportCsv" value="Export CSV" style="margin-left:8px;" />
     <span id="status" style="margin-left:10px; font-weight:bold; min-width:200px; display:inline-block;">Loading...</span>
   </td>
 </tr>
@@ -151,10 +169,8 @@ print qq{
 };
 
 &Header::closebox();
-
 print "<div id='tablecontainer'></div>";
 print "<script src='/include/jquery.js'></script>";
-
 print qq{
 <script>
 let refreshInterval = null;
@@ -168,6 +184,11 @@ let currentPage = 1;
 let pageSize = 50;
 let tableMeta = null;
 
+function isValidIPv4(ip) {
+    return /^(\\d{1,3}\\.){3}\\d{1,3}\$/.test(ip) &&
+           ip.split('.').every(o => parseInt(o,10) <= 255);
+}
+
 function sortTable(col) {
     currentSortAsc = (currentSortCol === col) ? !currentSortAsc : false;
     currentSortCol = col;
@@ -177,13 +198,11 @@ function sortTable(col) {
 function updatePagination(totalRows) {
     const totalPages = pageSize === 0 ? 1 : Math.ceil(totalRows / pageSize);
     currentPage = Math.min(currentPage, totalPages) || 1;
-
     let pag = '<strong>Page:</strong> ';
     if (pageSize === 0 || totalPages <= 1) {
         \$('#pagination').empty();
         return;
     }
-
     if (currentPage > 1) pag += '<a href="#" onclick="currentPage--; renderTable(); return false">&lt;&lt; Prev</a> ';
     pag += currentPage + ' / ' + totalPages;
     if (currentPage < totalPages) pag += ' <a href="#" onclick="currentPage++; renderTable(); return false">Next &gt;&gt;</a>';
@@ -197,7 +216,6 @@ function renderTable() {
         return;
     }
 
-    // Sorting
     if (currentSortCol !== null) {
         allRows.sort((a, b) => {
             const A = rawData[a.idx][currentSortCol];
@@ -207,12 +225,12 @@ function renderTable() {
             if (!isNaN(numA) && !isNaN(numB)) {
                 return (numA - numB) * (currentSortAsc ? 1 : -1);
             }
-            return (A > B ? 1 : -1) * (currentSortAsc ? 1 : -1);
+            return (A.localeCompare(B)) * (currentSortAsc ? 1 : -1);
         });
     }
 
     const start = pageSize === 0 ? 0 : (currentPage - 1) * pageSize;
-    const end = pageSize === 0 ? allRows.length : start + pageSize;
+    const end   = pageSize === 0 ? allRows.length : start + pageSize;
     const pageRows = allRows.slice(start, end);
 
     let html = '<table class="tbl" width="100%"><thead><tr class="tblhead">';
@@ -228,19 +246,27 @@ function renderTable() {
         rowObj.cells.forEach((cell, colIdx) => {
             let content = cell || ' ';
             let bg = '';
-            if (colIdx === tableMeta.src_ip_col || colIdx === tableMeta.dst_ip_col) {
+
+            // Defense-in-depth JS escaping
+            content = content.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+
+            if (tableMeta.src_ip_col >= 0 && tableMeta.dst_ip_col >= 0 &&
+                (colIdx === tableMeta.src_ip_col || colIdx === tableMeta.dst_ip_col)) {
                 const ipc = tableMeta.ip_colours[rowObj.idx];
                 if (ipc) bg = (colIdx === tableMeta.src_ip_col) ? ipc.src : ipc.dst;
+
+                if (isValidIPv4(content)) {
+                    content = '<a href="/cgi-bin/ipinfo.cgi?ip=' + encodeURIComponent(content) +
+                              '" target="_blank" style="color:#FFFFFF; font-weight:bold; text-decoration:underline;">' +
+                              content + '</a>';
+                }
             }
-            if ((colIdx === tableMeta.src_ip_col || colIdx === tableMeta.dst_ip_col) && content.match(/^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}\$/)) {
-                content = '<a href="/cgi-bin/ipinfo.cgi?ip=' + content + '" target="_blank" style="color:#FFFFFF; font-weight:bold; text-decoration:underline;">' + content + '</a>';
-            }
+
             html += '<td class="base" style="background-color:' + bg + ';">' + content + '</td>';
         });
         html += '</tr>';
     });
     html += '</tbody></table>';
-
     \$('#tablecontainer').html(html);
     updatePagination(allRows.length);
     applySearchOnPage();
@@ -249,32 +275,42 @@ function renderTable() {
 function applySearchOnPage() {
     const term = lastSearchTerm.toLowerCase();
     const col = parseInt(lastSearchCol);
-
     if (term === '') {
         \$('#tablecontainer tbody tr').show();
         return;
     }
-
     \$('#tablecontainer tbody tr').each(function() {
-        let show = false;
-        if (col === -1) {
-            show = \$(this).text().toLowerCase().indexOf(term) !== -1;
-        } else {
-            show = \$(this).children('td').eq(col).text().toLowerCase().indexOf(term) !== -1;
-        }
+        let show = (col === -1)
+            ? \$(this).text().toLowerCase().indexOf(term) !== -1
+            : \$(this).children('td').eq(col).text().toLowerCase().indexOf(term) !== -1;
         \$(this).toggle(show);
     });
 }
 
+function exportToCSV() {
+    if (!tableMeta || rawData.length === 0) return;
+    let csv = tableMeta.headers.join(',') + "\\r\\n";
+    rawData.forEach(row => {
+        csv += row.map(f => '"' + (f+'').replace(/"/g, '""') + '"').join(',') + "\\r\\n";
+    });
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', 'pmacct-top-talkers-' + new Date().toISOString().slice(0,19).replace(/:/g,'-') + '.csv');
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+
 function loadData() {
     \$('#status').html('<span style="color:orange;">Loading...</span>');
-
     \$.getJSON('pmacct.cgi?action=get_data')
     .done(function(data) {
         tableMeta = data;
-        rawData = data.raw_rows;
-        allRows = data.rows.map((row, idx) => ({ idx: idx, cells: row }));
-
+        rawData   = data.raw_rows;
+        allRows   = data.rows.map((row, idx) => ({ idx: idx, cells: row }));
         const now = new Date().toLocaleTimeString();
         \$('#status').html('<span style="color:green;">' + now + ' – ' + data.rows.length + ' entries</span>');
 
@@ -286,7 +322,6 @@ function loadData() {
         \$('#searchColumn').val(lastSearchCol);
         pageSize = parseInt(\$('#pageSize').val()) || 50;
         currentPage = 1;
-
         renderTable();
     })
     .fail(function() {
@@ -295,25 +330,33 @@ function loadData() {
     });
 }
 
+// Event handlers – classic functions so 'this' works correctly
 \$('#pageSize').on('change', function() {
-    pageSize = parseInt(\$(this).val()) || 0;
+    pageSize = parseInt(this.value) || 0;
     currentPage = 1;
     renderTable();
 });
+
 \$('#search').on('input', function() {
-    lastSearchTerm = \$(this).val().trim();
+    lastSearchTerm = this.value.trim();
     applySearchOnPage();
 });
+
 \$('#searchColumn').on('change', function() {
-    lastSearchCol = \$(this).val();
+    lastSearchCol = this.value;
     applySearchOnPage();
 });
+
 \$('#refresh').on('change', function() {
     clearInterval(refreshInterval);
-    const sec = parseInt(\$(this).val());
+    const sec = parseInt(this.value);
     if (sec > 0) refreshInterval = setInterval(loadData, sec * 1000);
 });
+
 \$('#manualRefresh').on('click', loadData);
+\$('#exportCsv').on('click', exportToCSV);
+
+window.addEventListener('beforeunload', function() { clearInterval(refreshInterval); });
 
 \$(document).ready(function() {
     loadData();
@@ -331,28 +374,43 @@ exit 0;
 # ===========================================================================
 sub get_pmacct_data {
     my @lines = `/usr/bin/pmacct -p /var/spool/pmacct/plugin1.pipe -s 2>/dev/null`;
-    return { headers => ['No data'], rows => [], raw_rows => [], ip_colours => [], bytes_col => 0, src_ip_col => 2, dst_ip_col => 3 } unless @lines;
+
+    unless (@lines) {
+        return {
+            headers => ['No data'], rows => [], raw_rows => [], ip_colours => [],
+            bytes_col => -1, src_ip_col => -1, dst_ip_col => -1
+        };
+    }
 
     my $header_line = shift @lines;
     while (defined $header_line && $header_line !~ /\S/ && @lines) {
         $header_line = shift @lines;
     }
-    return { headers => ['Error'], rows => [], raw_rows => [], ip_colours => [], bytes_col => 0 } unless $header_line;
+
+    unless ($header_line && $header_line =~ /\S/) {
+        return {
+            headers => ['Error parsing header'], rows => [], raw_rows => [], ip_colours => [],
+            bytes_col => -1, src_ip_col => -1, dst_ip_col => -1
+        };
+    }
 
     my @headers = split(/\s+/, $header_line);
 
-    my $bytes_col = 0;
-    my $src_ip_col = 2;
-    my $dst_ip_col = 3;
+    my $bytes_col   = -1;
+    my $src_ip_col  = -1;
+    my $dst_ip_col  = -1;
 
     for my $i (0 .. $#headers) {
-        $bytes_col = $i if uc($headers[$i]) eq 'BYTES';
-        $src_ip_col = $i if $headers[$i] =~ /SRC.*(IP|HOST)/i;
-        $dst_ip_col = $i if $headers[$i] =~ /DST.*(IP|HOST)/i;
+        $bytes_col   = $i if uc($headers[$i]) eq 'BYTES';
+        $src_ip_col  = $i if $headers[$i] =~ /SRC.*(IP|HOST)/i;
+        $dst_ip_col  = $i if $headers[$i] =~ /DST.*(IP|HOST)/i;
     }
 
-    my @rows = ();
-    my @raw_rows = ();
+    # Limit to maximum 1000 data rows
+    @lines = splice(@lines, 0, 1000) if @lines > 1000;
+
+    my @rows       = ();
+    my @raw_rows   = ();
     my @ip_colours = ();
 
     foreach my $line (@lines) {
@@ -360,18 +418,18 @@ sub get_pmacct_data {
         my @fields = split(/\s+/, $line);
         next unless scalar(@fields) >= scalar(@headers);
 
-        my @display = @fields;
-        my @raw = @fields;
+        my @display = map { html_escape($_) } @fields;
+        my @raw     = @fields;
 
-        if ($bytes_col < scalar(@fields) && $fields[$bytes_col] =~ /^\d+$/) {
-            $display[$bytes_col] = &General::formatBytes($fields[$bytes_col]);
+        if ($bytes_col >= 0 && $fields[$bytes_col] =~ /^\d+$/) {
+            $display[$bytes_col] = html_escape( &General::formatBytes($fields[$bytes_col]) );
         }
 
-        my $src_colour = ipcolour($fields[$src_ip_col] // '');
-        my $dst_colour = ipcolour($fields[$dst_ip_col] // '');
+        my $src_colour = ($src_ip_col >= 0) ? ipcolour($fields[$src_ip_col] // '') : ${Header::colourred};
+        my $dst_colour = ($dst_ip_col >= 0) ? ipcolour($fields[$dst_ip_col] // '') : ${Header::colourred};
 
-        push @rows, [ @display ];
-        push @raw_rows, [ @raw ];
+        push @rows,       [ @display ];
+        push @raw_rows,   [ @raw ];
         push @ip_colours, { src => $src_colour, dst => $dst_colour };
     }
 
