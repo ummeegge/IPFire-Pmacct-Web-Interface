@@ -300,7 +300,6 @@ print qq{
 print "<div id='tablecontainer'></div>";
 print "<script src='/include/jquery.js'></script>";
 print qq{
-print qq|
 <script>
 	// ---------------------------------------------------------------------------
 	// Global variables for UI state management
@@ -550,7 +549,6 @@ print qq|
 		\$('#refresh').val('5').trigger('change');
 	});
 </script>
-|;
 };
 &Header::closebigbox();
 &Header::closepage();
