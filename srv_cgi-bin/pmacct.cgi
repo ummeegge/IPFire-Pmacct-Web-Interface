@@ -1,5 +1,5 @@
 #!/usr/bin/perl
-#=========================================================================================
+#===============================================================================
 # pmacct.cgi – Live NetFlow/sFlow Traffic Accounting for IPFire
 #
 # Features:
@@ -11,15 +11,15 @@
 # - Search "All columns" without false positives across borders
 # - CSV export
 # - Full XSS protection including single quotes
-# - Maximum 1000 flows, cached network list, error handling
+# - Maximum 1000 flows, cached network list, bulletproof error handling
 # - Configurable data sources from pmacct.conf (memory plugins with pipe parsing)
 # - Support for multiple memory plugins via dropdown selection
-# - Automatic fallback to default pipe (/tmp/collect.pipe) if no valid config can be found
+# - Automatic fallback to default pipe (/tmp/collect.pipe) if no valid config
 #
 # Author: ummeegge
-# Version: 0.8.7
+# Version: 0.8.8
 # License: GPL-3.0
-#=========================================================================================
+#===============================================================================
 use strict;
 use warnings;
 no warnings 'once';
@@ -363,14 +363,15 @@ print qq{
       \$('#pagination').empty();
       return;
     }
-    // === SORTING: natural IPv4 → numeric → string ===
+    // === SORTING: natural IPv4 → numeric → string (SAFE!) ===
     if (currentSortCol !== null) {
       allRows.sort((a, b) => {
-        let A = rawData[a.idx][currentSortCol];
-        let B = rawData[b.idx][currentSortCol];
-        // Natural IPv4 sorting for IP columns
+        let A = rawData[a.idx][currentSortCol] ?? '';
+        let B = rawData[b.idx][currentSortCol] ?? '';
+
+        // Natural IPv4 sorting
         if (currentSortCol === tableMeta.src_ip_col || currentSortCol === tableMeta.dst_ip_col) {
-          const ipToNum = ip => ip.split('.').map(o => parseInt(o, 10) || 0);
+          const ipToNum = ip => (ip || '').split('.').map(n => parseInt(n, 10) || 0);
           const arrA = ipToNum(A);
           const arrB = ipToNum(B);
           for (let i = 0; i < 4; i++) {
@@ -380,14 +381,18 @@ print qq{
           }
           return 0;
         }
+
         // Numeric sorting
         const numA = Number(A);
         const numB = Number(B);
-        if (!isNaN(numA) && !isNaN(numB) ) {
+        if (!isNaN(numA) && !isNaN(numB)) {
           return (numA - numB) * (currentSortAsc ? 1 : -1);
         }
-        // String fallback
-        return A.localeCompare(B) * (currentSortAsc ? 1 : -1);
+
+        // Safe string fallback
+        const strA = String(A);
+        const strB = String(B);
+        return strA.localeCompare(strB) * (currentSortAsc ? 1 : -1);
       });
     }
     const start = pageSize === 0 ? 0 : (currentPage - 1) * pageSize;
@@ -650,24 +655,38 @@ sub get_pmacct_data {
   foreach my $line (@lines) {
     next unless $line =~ /\S/;
     my @fields = split(/\s+/, $line);
+
+    # Must have exactly as many fields as headers
     if (@fields != @headers) {
       log_warning("Malformed line in pmacct output: skipping (expected " . scalar(@headers) . " fields, got " . scalar(@fields) . ")");
       next;
     }
-    my @display = map { html_escape($_) } @fields;
+
+    # --- CRITICAL: replace any possible undef with empty string ---
+    @fields = map { defined $_ ? $_ : '' } @fields;
+
+    # Raw data (clean, no undef)
     my @raw = @fields;
+
+    # Display data (HTML-escaped)
+    my @display = map { html_escape($_) } @fields;
+
+    # Format bytes column if present
     if ($bytes_col >= 0) {
       if ($fields[$bytes_col] =~ /^\d+$/) {
         $display[$bytes_col] = html_escape(&General::formatBytes($fields[$bytes_col]));
       } else {
-        log_warning("Invalid bytes value: $fields[$bytes_col]");
+        log_warning("Invalid bytes value: '$fields[$bytes_col]'");
         next;
       }
     }
+
+    # IP coloring (// '' guarantees a string even if field is empty)
     my $src_colour = ($src_ip_col >= 0) ? ipcolour($fields[$src_ip_col] // '') : ${Header::colourred};
     my $dst_colour = ($dst_ip_col >= 0) ? ipcolour($fields[$dst_ip_col] // '') : ${Header::colourred};
-    push @rows, [ @display ];
-    push @raw_rows, [ @raw ];
+
+    push @rows,      [ @display ];
+    push @raw_rows,  [ @raw ];
     push @ip_colours, { src => $src_colour, dst => $dst_colour };
   }
   return {
