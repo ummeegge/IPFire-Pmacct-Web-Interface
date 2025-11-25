@@ -83,49 +83,59 @@ sub show_messages {
 # ---------------------------------------------------------------------------
 my %mainsettings = ();
 &General::readhash("/var/ipfire/ethernet/settings", \%mainsettings);
+
 my %networks = (
 	"127.0.0.0/8" => ${Header::colourfw},
 	"224.0.0.0/4" => "#A0A0A0", # Multicast
 );
+
 # Local zones (GREEN, BLUE, ORANGE)
 if ($mainsettings{'GREEN_NETADDRESS'}) {
 	$networks{"$mainsettings{'GREEN_NETADDRESS'}/$mainsettings{'GREEN_NETMASK'}"} = ${Header::colourgreen};
 }
+
 if ($mainsettings{'BLUE_NETADDRESS'}) {
 	$networks{"$mainsettings{'BLUE_NETADDRESS'}/$mainsettings{'BLUE_NETMASK'}"} = ${Header::colourblue};
 }
+
 if ($mainsettings{'ORANGE_NETADDRESS'}) {
 	$networks{"$mainsettings{'ORANGE_NETADDRESS'}/$mainsettings{'ORANGE_NETMASK'}"} = ${Header::colourorange};
 }
+
 # RED interface + aliases
 my $red = &IDS::get_red_address();
 $networks{"${red}/32"} = ${Header::colourfw} if $red;
 foreach my $alias (&IDS::get_aliases()) {
 	$networks{"${alias}/32"} = ${Header::colourfw} if $alias;
 }
+
 # VPN / OpenVPN / WireGuard subnets
 if (-e "/var/ipfire/vpn/config") {
-  if (open(my $fh, "<", "/var/ipfire/vpn/config")) {
-	while (<$fh>) {
-	  my @vpn = split(/,/, $_);
-	  my @subnets = split(/\|/, $vpn[12] // '');
-	  $networks{$_} = ${Header::colourvpn} for grep {$_} @subnets;
+	if (open(my $fh, "<", "/var/ipfire/vpn/config")) {
+		while (<$fh>) {
+			my @vpn = split(/,/, $_);
+			my @subnets = split(/\|/, $vpn[12] // '');
+			$networks{$_} = ${Header::colourvpn} for grep {$_} @subnets;
+		}
+		close($fh);
 	}
-	close($fh);
-  }
 }
+
 if (-e "/var/ipfire/ovpn/settings") {
 	my %ovpn = ();
 	&General::readhash("/var/ipfire/ovpn/settings", \%ovpn);
 	$networks{$ovpn{'DOVPN_SUBNET'}} = ${Header::colourovpn} if $ovpn{'DOVPN_SUBNET'};
 }
+
 if (-e "/var/ipfire/wireguard/settings") {
 	my %wg = ();
 	&General::readhash("/var/ipfire/wireguard/settings", \%wg);
 	$networks{$wg{'CLIENT_POOL'}} = ${Header::colourwg} if $wg{'CLIENT_POOL'};
 }
+
 # Cached sorted network list – longest prefix first (most specific match wins)
 my @sorted_networks = sort { &Network::get_prefix($b) <=> &Network::get_prefix($a) } keys %networks;
+
 # ---------------------------------------------------------------------------
 # Subroutine to return background color for a given IP
 # Uses cached network list for fast lookup; defaults to red for internet IPs.
@@ -141,6 +151,7 @@ sub ipcolour {
 	}
 	return ${Header::colourred}; # Everything else = Internet (RED)
 }
+
 # ---------------------------------------------------------------------------
 # Subroutine for full HTML entity escaping
 # Protects against XSS by escaping special characters, including single quotes.
@@ -154,6 +165,7 @@ sub html_escape {
 	$text =~ s/'/&#39;/g;
 	return $text;
 }
+
 # ---------------------------------------------------------------------------
 # Subroutine to parse pmacct.conf for memory plugins and pipes
 # Extracts all memory plugins from 'plugins:' line (handles multiple in one line).
@@ -161,75 +173,76 @@ sub html_escape {
 # Warns on issues but does not skip valid pipes for robustness.
 # ---------------------------------------------------------------------------
 sub get_pmacct_memory_pipes {
-  my $conf_file = '/etc/pmacct/pmacct.conf';
-  my $default_pipe = '/tmp/collect.pipe';
-  my %pipes = ();
-  my %found_plugins = ();
-  unless (-r $conf_file) {
-	log_warning("pmacct.conf not readable: $conf_file - trying default pipe");
-	return { 'default' => $default_pipe } if -e $default_pipe;
-	return {}; # No fallback if default does not exist → Error
-  }
-  open(my $fh, '<', $conf_file) or do {
-	log_warning("Failed to open pmacct.conf: $! - trying default pipe");
-	return { 'default' => $default_pipe } if -e $default_pipe;
-	return {};
-  };
-  while (<$fh>) {
-	next if /^\s*[!#]/ || !/\S/; # Skip comments/empty
-	if (/^\s*plugins:\s*/i) {
-	  while (/memory\s*\[\s*plugin(\d+)\s*\]/ig) {
-		$found_plugins{"plugin$1"} = 1;
-	  }
-	  next;
+	my $conf_file = '/etc/pmacct/pmacct.conf';
+	my $default_pipe = '/tmp/collect.pipe';
+	my %pipes = ();
+	my %found_plugins = ();
+	unless (-r $conf_file) {
+		log_warning("pmacct.conf not readable: $conf_file - trying default pipe");
+		return { 'default' => $default_pipe } if -e $default_pipe;
+		return {}; # No fallback if default does not exist → Error
 	}
-	if (/^\s*imt_path\s*\[\s*plugin(\d+)\s*\]\s*:\s*(.+?)\s*$/i) {
-	  my $plugin_num = $1;
-	  my $pipe = $2;
-	  $pipe =~ s/\s+//g;  # Trim whitespace for clean path
-	  my $plugin = "plugin$plugin_num";
-	  if (exists $found_plugins{$plugin}) {
-		$pipes{$plugin} = $pipe;
-		delete $found_plugins{$plugin};
-	  }
+	open(my $fh, '<', $conf_file) or do {
+		log_warning("Failed to open pmacct.conf: $! - trying default pipe");
+		return { 'default' => $default_pipe } if -e $default_pipe;
+		return {};
+	};
+	while (<$fh>) {
+		next if /^\s*[!#]/ || !/\S/; # Skip comments/empty
+		if (/^\s*plugins:\s*/i) {
+			while (/memory\s*\[\s*plugin(\d+)\s*\]/ig) {
+			$found_plugins{"plugin$1"} = 1;
+			}
+			next;
+		}
+		if (/^\s*imt_path\s*\[\s*plugin(\d+)\s*\]\s*:\s*(.+?)\s*$/i) {
+			my $plugin_num = $1;
+			my $pipe = $2;
+			$pipe =~ s/\s+//g;  # Trim whitespace for clean path
+			my $plugin = "plugin$plugin_num";
+			if (exists $found_plugins{$plugin}) {
+				$pipes{$plugin} = $pipe;
+				delete $found_plugins{$plugin};
+			}
+		}
 	}
-  }
-  close($fh);
-  # Skip pending plugins without pipe
-  foreach my $pending (keys %found_plugins) {
-	log_warning("Skipping $pending: No imt_path defined");
-  }
-  # Global fallback if nothing valid
-  unless (keys %pipes) {
-	log_warning("No valid memory plugins with pipes found - using default pipe if available");
-	return { 'default' => $default_pipe } if -e $default_pipe;
-	return {}; # Skip everything → Error in WUI
-  }
-  # Checks: Daemon and pipe existence/readability – warn and skip invalid
-  my @ps = `ps aux | grep '[p]macctd' 2>/dev/null`;
-  unless (@ps) {
-	log_warning("pmacctd daemon not running");
-  }
-  foreach my $plugin (keys %pipes) {
-	my $pipe = $pipes{$plugin};
-	log_info("Checking pipe/socket for $plugin: $pipe");  # Debug log
-	if (-e $pipe) {
-	  unless (-r $pipe && (-p $pipe || -S $pipe)) {  # Support both FIFO (p) and socket (S)
-		log_warning("Pipe/socket for $plugin exists but not readable or invalid type: $pipe");
-		delete $pipes{$plugin};
-	  }
+	close($fh);
+	# Skip pending plugins without pipe
+	foreach my $pending (keys %found_plugins) {
+		log_warning("Skipping $pending: No imt_path defined");
+	}
+	# Global fallback if nothing valid
+	unless (keys %pipes) {
+		log_warning("No valid memory plugins with pipes found - using default pipe if available");
+		return { 'default' => $default_pipe } if -e $default_pipe;
+		return {}; # Skip everything → Error in WUI
+	}
+	# Checks: Daemon and pipe existence/readability – warn and skip invalid
+	my @ps = `ps aux | grep '[p]macctd' 2>/dev/null`;
+	unless (@ps) {
+		log_warning("pmacctd daemon not running");
+	}
+	foreach my $plugin (keys %pipes) {
+		my $pipe = $pipes{$plugin};
+		log_info("Checking pipe/socket for $plugin: $pipe");  # Debug log
+		if (-e $pipe) {
+			unless (-r $pipe && (-p $pipe || -S $pipe)) {  # Support both FIFO (p) and socket (S)
+			log_warning("Pipe/socket for $plugin exists but not readable or invalid type: $pipe");
+			delete $pipes{$plugin};
+		}
 	} else {
-	  log_warning("Pipe/socket for $plugin does not exist: $pipe – skipping");
-	  delete $pipes{$plugin};
+		log_warning("Pipe/socket for $plugin does not exist: $pipe – skipping");
+		delete $pipes{$plugin};
+		}
 	}
-  }
-  # Final check: No valid pipes left
-  unless (keys %pipes) {
-	log_error("No valid pipes/sockets found after checks");
-	return {};
-  }
-  return \%pipes;
+	# Final check: No valid pipes left
+	unless (keys %pipes) {
+		log_error("No valid pipes/sockets found after checks");
+		return {};
+	}
+	return \%pipes;
 }
+
 # ---------------------------------------------------------------------------
 # CGI handling section
 # Processes GET requests for data (JSON) or renders the HTML page.
@@ -241,6 +254,7 @@ if ($q->param('action') && $q->param('action') eq 'get_data') {
 	print encode_json($data);
 	exit 0;
 }
+
 # ---------------------------------------------------------------------------
 # HTML page rendering
 # Outputs the main UI with controls for refresh, pagination, search, etc.
