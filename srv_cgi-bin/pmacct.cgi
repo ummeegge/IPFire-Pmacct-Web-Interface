@@ -700,7 +700,7 @@ sub get_pmacct_data {
 		$dst_ip_col = $i if $headers[$i] =~ /DST.*(IP|HOST)/i;
 	}
 
-	@lines = splice(@lines, 0, 1000) if @lines > 1000;
+	#@lines = splice(@lines, 0, 1000) if @lines > 1000;
 
 	my @rows       = ();
 	my @raw_rows   = ();
