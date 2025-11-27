@@ -17,7 +17,7 @@
 # - Automatic fallback to default pipe (/tmp/collect.pipe) if no valid config
 #
 # Author: ummeegge
-# Version: 0.8.9
+# Version: 0.8.10
 # License: GPL-3.0
 #===============================================================================
 use strict;
@@ -716,37 +716,45 @@ sub get_pmacct_data {
 
 	#@lines = splice(@lines, 0, 1000) if @lines > 1000;
 
-	my @rows       = ();
-	my @raw_rows   = ();
+	my @rows = ();
+	my @raw_rows = ();
 	my @ip_colours = ();
+	# Packets and Bytes are minimum
+	my $min_fields = 2;
 
 	foreach my $line (@lines) {
 		next unless $line =~ /\S/;
 
-		my @fields = split(/\s+/, $line);
-
-		if (@fields != @headers) {
-			log_warning("Malformed line in pmacct output: skipping (expected " . scalar(@headers) . " fields, got " . scalar(@fields) . ")");
+		# Ignoring pmacct -s summary
+		if ($line =~ /^For\s+a\s+total\s+of:/i) {
 			next;
 		}
 
-		@fields = map { defined $_ ? $_ : '' } @fields;
+		my @fields = grep { /\S/ } split(/\s+/, $line);
 
-		my @raw     = @fields;
+		while (@fields < @headers) {
+			push @fields, '';
+		}
+
+		if (@fields > @headers || @fields < $min_fields) {
+			log_warning("Malformed line in pmacct output: skipping (expected ~" . scalar(@headers) . " fields, got " . scalar(@fields) . "). Offending line: '$line'");  # Debugging: Logge die Zeile
+			next;
+		}
+
+		my @raw = @fields;
 		my @display = map { html_escape($_) } @fields;
 
-		if ($bytes_col >= 0 && $fields[$bytes_col] =~ /^\d+$/) {
+		if ($bytes_col >= 0 && $bytes_col < @fields && $fields[$bytes_col] =~ /^\d+$/) {
 			$display[$bytes_col] = html_escape(&General::formatBytes($fields[$bytes_col]));
 		}
 
-		my $src_colour = ($src_ip_col >= 0) ? ipcolour($fields[$src_ip_col] // '') : ${Header::colourred};
-		my $dst_colour = ($dst_ip_col >= 0) ? ipcolour($fields[$dst_ip_col] // '') : ${Header::colourred};
+		my $src_colour = ($src_ip_col >= 0 && $src_ip_col < @fields && $fields[$src_ip_col]) ? ipcolour($fields[$src_ip_col]) : ${Header::colourred};
+		my $dst_colour = ($dst_ip_col >= 0 && $dst_ip_col < @fields && $fields[$dst_ip_col]) ? ipcolour($fields[$dst_ip_col]) : ${Header::colourred};
 
-		push @rows,       [ @display ];
-		push @raw_rows,   [ @raw ];
+		push @rows, [@display];
+		push @raw_rows, [@raw];
 		push @ip_colours, { src => $src_colour, dst => $dst_colour };
 	}
-
 	return {
 		headers         => [ @headers ],
 		rows            => [ @rows ],
