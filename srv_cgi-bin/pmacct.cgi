@@ -15,23 +15,34 @@
 # - Configurable data sources from pmacct.conf (memory plugins with pipe parsing)
 # - Support for multiple memory plugins via dropdown selection
 # - Automatic fallback to default pipe (/tmp/collect.pipe) if no valid config
+# - "Show provider names & flags" checkbox – replaces IPs with AS names
+#       (e.g. "Google LLC", "Hetzner Online GmbH", "Cloudflare, Inc.")
+#       + country flags, powered by IPFire's native libloc database
 #
 # Author: ummeegge
-# Version: 0.8.11
+# Version: 0.9
 # License: GPL-3.0
 #===============================================================================
 use strict;
 use warnings;
 no warnings 'once';
 use CGI qw(:standard);
+use CGI::Carp qw(fatalsToBrowser warningsToBrowser);
 use JSON::PP qw(encode_json);
 use IPC::Open3;  # For secure command execution
 use List::Util qw(all);  # For IP validation
+
 require '/var/ipfire/general-functions.pl';
 require '/var/ipfire/header.pl';
 require '/var/ipfire/lang.pl';
 require '/var/ipfire/ids-functions.pl';
 require '/var/ipfire/network-functions.pl';
+require "${General::swroot}/location-functions.pl";
+
+# ---------------------------------------------------------------------------
+# Server-side cache for location lookups (IP → display string + flag)
+# ---------------------------------------------------------------------------
+our %LOCATION_CACHE;
 
 # ---------------------------------------------------------------------------
 # Logging variables and subroutines for UI messages
@@ -256,6 +267,47 @@ if ($q->param('action') && $q->param('action') eq 'get_data') {
 }
 
 # ---------------------------------------------------------------------------
+# Location Lookup Handler – pure libloc version (no DNS/PTR anymore)
+# ---------------------------------------------------------------------------
+if ($q->param('action') && $q->param('action') eq 'location_lookup') {
+	my $ip = $q->param('ip') // '';
+	print $q->header(-type => 'application/json', -charset => 'utf-8');
+
+	# Accept both IPv4 and IPv6
+	if (&General::validip($ip) || &General::validip6($ip)) {
+
+		# Return cached result if we already resolved this IP
+		if (exists $LOCATION_CACHE{$ip}) {
+			print encode_json($LOCATION_CACHE{$ip});
+			exit 0;
+		}
+
+		my $asn       = Location::Functions::lookup_asn($ip)       // '';
+		my $as_name   = $asn ? Location::Functions::get_as_name($asn) : '';
+		my $ccode     = Location::Functions::lookup_country_code($ip) // '';
+		my $flag_icon = $ccode ? Location::Functions::get_flag_icon($ccode) : '';
+
+		# Final display: AS name if available, otherwise fall back to raw IP
+		my $display = $as_name ? $as_name : $ip;
+
+		# Build result
+		my $result = {
+			ip        => $ip,
+			display   => $display,
+			flag_icon => $flag_icon,   # e.g. "/images/flags/de.png" or empty
+		};
+
+		# Cache it for this CGI run (shared across all table refreshes)
+		$LOCATION_CACHE{$ip} = $result;
+
+		print encode_json($result);
+	} else {
+		print encode_json({ display => $ip, flag_icon => '' });
+	}
+	exit 0;
+}
+
+# ---------------------------------------------------------------------------
 # HTML page rendering
 # Outputs the main UI with controls for refresh, pagination, search, etc.
 # ---------------------------------------------------------------------------
@@ -304,6 +356,13 @@ print qq{
 		</td>
 	</tr>
 	<tr>
+		<td colspan="5" style="text-align:left; padding:8px 0;">
+			<label style="font-weight:bold; cursor:pointer; user-select:none;">
+				<input type="checkbox" id="resolveDns" style="vertical-align:middle;"> Show provider names & flags
+			</label>
+		</td>
+	</tr>
+	<tr>
 		<td colspan="5" align="center">
 			<div id="pagination" style="margin-top:10px; font-weight:bold;"></div>
 		</td>
@@ -328,6 +387,49 @@ print qq{
 	let currentPage     = 1;
 	let pageSize        = 50;
 	let tableMeta       = null;
+	let dnsActive       = false;
+
+	// Event Handler for DNS checkbox
+	\$('#resolveDns').on('change', function() {
+		dnsActive = this.checked;
+		renderTable();
+	});
+
+	// ---------------------------------------------------------------------------
+	// DNS Cache + Location Resolver (IPFIRE NATIVE!)
+	// ---------------------------------------------------------------------------
+	let dnsCache = new Map();
+
+	async function resolveDns(ip) {
+		if (!dnsActive || !isValidIPv4(ip)) return ip;
+
+		if (dnsCache.has(ip)) {
+			return dnsCache.get(ip);
+		}
+
+		try {
+			const response = await fetch('/cgi-bin/pmacct.cgi?action=location_lookup&ip=' + encodeURIComponent(ip));
+			if (!response.ok) {
+				dnsCache.set(ip, ip);
+				return ip;
+			}
+
+			const data = await response.json();
+			if (data.error) {
+				dnsCache.set(ip, ip);
+				return ip;
+			}
+
+			// PTR > AS-Name > IP (perfekte Reihenfolge!)
+			const hostname = data.display || ip;
+			dnsCache.set(ip, hostname);
+			return hostname;
+
+		} catch(e) {
+			dnsCache.set(ip, ip);
+			return ip;
+		}
+	}
 
 	// ---------------------------------------------------------------------------
 	// Helper function to validate IPv4 addresses
@@ -364,7 +466,7 @@ print qq{
 	}
 
 	// ---------------------------------------------------------------------------
-	// Function to render the table HTML
+	// Function to render the table HTML (with post-processing for provider names)
 	// ---------------------------------------------------------------------------
 	function renderTable() {
 		if (!tableMeta || allRows.length === 0) {
@@ -372,12 +474,13 @@ print qq{
 			\$('#pagination').empty();
 			return;
 		}
-		// === SORTING: natural IPv4 → numeric → string (SAFE!) ===
+
+		// === SORTING ===
 		if (currentSortCol !== null) {
 			allRows.sort((a, b) => {
 				let A = rawData[a.idx][currentSortCol] ?? '';
 				let B = rawData[b.idx][currentSortCol] ?? '';
-				// Natural IPv4 sorting
+				// IPv4 sorting
 				if (currentSortCol === tableMeta.src_ip_col || currentSortCol === tableMeta.dst_ip_col) {
 					const ipToNum = ip => (ip || '').split('.').map(n => parseInt(n, 10) || 0);
 					const arrA = ipToNum(A);
@@ -401,9 +504,11 @@ print qq{
 				return strA.localeCompare(strB) * (currentSortAsc ? 1 : -1);
 			});
 		}
+
 		const start = pageSize === 0 ? 0 : (currentPage - 1) * pageSize;
-		const end = pageSize === 0 ? allRows.length : start + pageSize;
+		const end   = pageSize === 0 ? allRows.length : start + pageSize;
 		const pageRows = allRows.slice(start, end);
+
 		let html = '<table class="tbl" width="100%"><thead><tr class="tblhead">';
 		tableMeta.headers.forEach((h, i) => {
 			let arrow = (i === currentSortCol) ? (currentSortAsc ? ' ↑' : ' ↓') : '';
@@ -411,30 +516,87 @@ print qq{
 			html += '<th style="cursor:pointer;" onclick="sortTable(' + i + ')"><b>' + h.replace(/_/g, ' ') + '</b>' + arrow + '</th>';
 		});
 		html += '</tr></thead><tbody>';
+
 		pageRows.forEach(rowObj => {
 			html += '<tr>';
 			rowObj.cells.forEach((cell, colIdx) => {
 				let content = cell || ' ';
 				let bg = '';
 				content = content.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":''})[m]);
+
 				const ipc = tableMeta.ip_colours[rowObj.idx];
 				if (ipc) {
 					if (colIdx === tableMeta.src_ip_col && tableMeta.src_ip_col >= 0) bg = ipc.src;
 					if (colIdx === tableMeta.dst_ip_col && tableMeta.dst_ip_col >= 0) bg = ipc.dst;
 				}
+
 				if ((colIdx === tableMeta.src_ip_col || colIdx === tableMeta.dst_ip_col) && isValidIPv4(content)) {
 					content = '<a href="/cgi-bin/ipinfo.cgi?ip=' + encodeURIComponent(content) +
-					  '" target="_blank" style="color:#FFFFFF; font-weight:bold; text-decoration:underline;">' +
-					  content + '</a>';
+						'" target="_blank" style="color:#FFFFFF; font-weight:bold; text-decoration:underline;" ' +
+						'data-ip="' + content + '">' + content + '</a>';
 				}
-				html += '<td class="base" style="background-color:' + bg + ';">' + content + '</td>';
+
+				html += '<td class="base dns-cell" style="background-color:' + bg + ';">' + content + '</td>';
 			});
 			html += '</tr>';
 		});
+
 		html += '</tbody></table>';
 		\$('#tablecontainer').html(html);
 		updatePagination(allRows.length);
 		applySearchOnPage();
+
+		if (dnsActive) {
+			updateDnsLinks();
+		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// Async resolver: returns AS name + flag icon
+	// ---------------------------------------------------------------------------
+	async function resolveDns(ip) {
+		if (!dnsActive || !isValidIPv4(ip)) return { display: ip, flag: '' };
+
+		if (dnsCache.has(ip)) {
+			return dnsCache.get(ip);
+		}
+
+		try {
+			const response = await fetch('/cgi-bin/pmacct.cgi?action=location_lookup&ip=' + encodeURIComponent(ip));
+			if (!response.ok) throw new Error();
+
+			const data = await response.json();
+			const result = {
+				display: data.display || ip,
+				flag: data.flag_icon ? '<img src="' + data.flag_icon + '" width="16" height="11" alt="" style="margin-left:5px; vertical-align:middle;">' : ''
+			};
+
+			dnsCache.set(ip, result);
+			return result;
+		} catch (e) {
+			const fallback = { display: ip, flag: '' };
+			dnsCache.set(ip, fallback);
+			return fallback;
+		}
+	}
+
+	// ---------------------------------------------------------------------------
+	// Post-processing: replace IPs with provider name + flag
+	// ---------------------------------------------------------------------------
+	async function updateDnsLinks() {
+		const ipLinks = \$('#tablecontainer a[data-ip]');
+		for (const link of ipLinks) {
+			const \$link = \$(link);
+			const ip = \$link.data('ip');
+			const resolved = await resolveDns(ip);
+
+			if (resolved.display !== ip) {
+				\$link.html(resolved.display + resolved.flag);
+				\$link.attr('title', ip + ' → ' + resolved.display);
+			} else if (resolved.flag) {
+				\$link.append(resolved.flag);
+			}
+		}
 	}
 
 	// ---------------------------------------------------------------------------
