@@ -17,7 +17,7 @@
 # - Automatic fallback to default pipe (/tmp/collect.pipe) if no valid config
 #
 # Author: ummeegge
-# Version: 0.8.10
+# Version: 0.8.11
 # License: GPL-3.0
 #===============================================================================
 use strict;
@@ -372,13 +372,11 @@ print qq{
 			\$('#pagination').empty();
 			return;
 		}
-
 		// === SORTING: natural IPv4 → numeric → string (SAFE!) ===
 		if (currentSortCol !== null) {
 			allRows.sort((a, b) => {
 				let A = rawData[a.idx][currentSortCol] ?? '';
 				let B = rawData[b.idx][currentSortCol] ?? '';
-
 				// Natural IPv4 sorting
 				if (currentSortCol === tableMeta.src_ip_col || currentSortCol === tableMeta.dst_ip_col) {
 					const ipToNum = ip => (ip || '').split('.').map(n => parseInt(n, 10) || 0);
@@ -391,25 +389,21 @@ print qq{
 					}
 					return 0;
 				}
-
 				// Numeric sorting
 				const numA = Number(A);
 				const numB = Number(B);
 				if (!isNaN(numA) && !isNaN(numB)) {
 					return (numA - numB) * (currentSortAsc ? 1 : -1);
 				}
-
 				// Safe string fallback
 				const strA = String(A);
 				const strB = String(B);
 				return strA.localeCompare(strB) * (currentSortAsc ? 1 : -1);
 			});
 		}
-
 		const start = pageSize === 0 ? 0 : (currentPage - 1) * pageSize;
-		const end   = pageSize === 0 ? allRows.length : start + pageSize;
+		const end = pageSize === 0 ? allRows.length : start + pageSize;
 		const pageRows = allRows.slice(start, end);
-
 		let html = '<table class="tbl" width="100%"><thead><tr class="tblhead">';
 		tableMeta.headers.forEach((h, i) => {
 			let arrow = (i === currentSortCol) ? (currentSortAsc ? ' ↑' : ' ↓') : '';
@@ -423,15 +417,15 @@ print qq{
 				let content = cell || ' ';
 				let bg = '';
 				content = content.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":''})[m]);
-				if (tableMeta.src_ip_col >= 0 && tableMeta.dst_ip_col >= 0 &&
-					(colIdx === tableMeta.src_ip_col || colIdx === tableMeta.dst_ip_col)) {
-					const ipc = tableMeta.ip_colours[rowObj.idx];
-					if (ipc) bg = (colIdx === tableMeta.src_ip_col) ? ipc.src : ipc.dst;
-					if (isValidIPv4(content)) {
-						content = '<a href="/cgi-bin/ipinfo.cgi?ip=' + encodeURIComponent(content) +
-								  '" target="_blank" style="color:#FFFFFF; font-weight:bold; text-decoration:underline;">' +
-								  content + '</a>';
-					}
+				const ipc = tableMeta.ip_colours[rowObj.idx];
+				if (ipc) {
+					if (colIdx === tableMeta.src_ip_col && tableMeta.src_ip_col >= 0) bg = ipc.src;
+					if (colIdx === tableMeta.dst_ip_col && tableMeta.dst_ip_col >= 0) bg = ipc.dst;
+				}
+				if ((colIdx === tableMeta.src_ip_col || colIdx === tableMeta.dst_ip_col) && isValidIPv4(content)) {
+					content = '<a href="/cgi-bin/ipinfo.cgi?ip=' + encodeURIComponent(content) +
+					  '" target="_blank" style="color:#FFFFFF; font-weight:bold; text-decoration:underline;">' +
+					  content + '</a>';
 				}
 				html += '<td class="base" style="background-color:' + bg + ';">' + content + '</td>';
 			});
