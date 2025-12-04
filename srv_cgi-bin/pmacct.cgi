@@ -20,7 +20,7 @@
 #       + country flags, powered by IPFire's native libloc database
 #
 # Author: ummeegge
-# Version: 0.9
+# Version: 0.9.1
 # License: GPL-3.0
 #===============================================================================
 use strict;
@@ -395,6 +395,15 @@ print qq{
 		renderTable();
 	});
 
+	//---------------------------------------------------------------------------
+	// HTML escaping function to prevent XSS
+	//---------------------------------------------------------------------------
+	function escHtml(s) {
+		return String(s).replace(/[&<>"']/g, c => (
+			{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]
+		));
+	}
+
 	// ---------------------------------------------------------------------------
 	// DNS Cache + Location Resolver (IPFIRE NATIVE!)
 	// ---------------------------------------------------------------------------
@@ -513,7 +522,9 @@ print qq{
 		tableMeta.headers.forEach((h, i) => {
 			let arrow = (i === currentSortCol) ? (currentSortAsc ? ' ↑' : ' ↓') : '';
 			if (i === tableMeta.bytes_col && currentSortCol === null) arrow = ' ↓';
-			html += '<th style="cursor:pointer;" onclick="sortTable(' + i + ')"><b>' + h.replace(/_/g, ' ') + '</b>' + arrow + '</th>';
+
+			let safeHeader = escHtml(h.replace(/_/g, ' '));
+			html += '<th style="cursor:pointer;" onclick="sortTable(' + i + ')"><b>' + safeHeader + '</b>' + arrow + '</th>';
 		});
 		html += '</tr></thead><tbody>';
 
@@ -668,7 +679,10 @@ print qq{
 			\$('#status').html(statusHtml);
 			const sel = \$('#searchColumn');
 			sel.empty().append('<option value="-1">All columns</option>');
-			(data.headers || []).forEach((h, i) => sel.append('<option value="' + i + '">' + h.replace(/_/g, ' ') + '</option>'));
+			(data.headers || []).forEach((h, i) => {
+				let safeHeader = escHtml(h.replace(/_/g, ' '));
+				sel.append('<option value="' + i + '">' + safeHeader + '</option>');
+			});
 			\$('#search').val(lastSearchTerm);
 			\$('#searchColumn').val(lastSearchCol);
 			pageSize = parseInt(\$('#pageSize').val()) || 50;
@@ -926,3 +940,4 @@ sub get_pmacct_data {
 		selected_plugin => $selected_plugin
 	};
 }
+
