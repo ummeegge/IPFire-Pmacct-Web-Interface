@@ -317,58 +317,91 @@ show_messages();  # Display any collected messages at the top
 &Header::openbigbox('100%', 'left', '');
 &Header::openbox('100%', 'left', 'Pmacct Live Traffic Accounting');
 print qq{
-	<table width="100%" cellspacing="4" cellpadding="2">
-	<tr>
-		<td width="20%"><strong>Data Source:</strong>
-			<select id="pluginSelect" style="margin-left:10px;">
-				<option value="">Loading...</option>
-			</select>
-		</td>
-		<td width="20%"><strong>Live Update:</strong>
-			<select id="refresh" style="margin-left:10px;">
-				<option value="0">Off</option>
-				<option value="2">2 seconds</option>
-				<option value="5" selected>5 seconds</option>
-				<option value="10">10 seconds</option>
-			</select>
-		</td>
-		<td width="20%"><strong>Rows per page:</strong>
-			<select id="pageSize" style="margin-left:10px;">
-				<option value="10">10</option>
-				<option value="20">20</option>
-				<option value="50" selected>50</option>
-				<option value="100">100</option>
-				<option value="250">250</option>
-				<option value="500">500</option>
-				<option value="0">All</option>
-			</select>
-		</td>
-		<td width="25%"><strong>Search in column:</strong>
-			<select id="searchColumn" style="margin-left:10px; width:200px;">
-				<option value="-1">All columns</option>
-			</select>
-			<input type="text" id="search" style="margin-left:10px; width:280px;" placeholder="e.g. 443, 192.168, tcp..." />
-		</td>
-		<td width="15%" align="right">
-			<input type="button" id="manualRefresh" value="Refresh now" />
-			<input type="button" id="exportCsv" value="Export CSV" style="margin-left:8px;" />
-			<span id="status" style="margin-left:10px; font-weight:bold; min-width:200px; display:inline-block;">Loading...</span>
-		</td>
-	</tr>
-	<tr>
-		<td colspan="5" style="text-align:left; padding:8px 0;">
-			<label style="font-weight:bold; cursor:pointer; user-select:none;">
-				<input type="checkbox" id="resolveDns" style="vertical-align:middle;"> Show provider names & flags
-			</label>
-		</td>
-	</tr>
-	<tr>
-		<td colspan="5" align="center">
-			<div id="pagination" style="margin-top:10px; font-weight:bold;"></div>
-		</td>
-	</tr>
-	</table>
+<table width="100%" cellspacing="4" cellpadding="2">
+
+<!-- 1. ROW: Data Source, Live Update, Rows per page -->
+<tr>
+	<td style="white-space:nowrap;">
+		<strong>Data Source:</strong>
+		<select id="pluginSelect" style="margin-left:10px; min-width:200px; max-width:100%; padding:2px 4px;">
+			<option value="">Loading...</option>
+		</select>
+	</td>
+	<td style="white-space:nowrap;">
+		<strong>Live Update:</strong>
+		<select id="refresh" style="margin-left:10px;">
+			<option value="0">Off</option>
+			<option value="2">2 seconds</option>
+			<option value="5" selected>5 seconds</option>
+			<option value="10">10 seconds</option>
+		</select>
+	</td>
+	<td style="white-space:nowrap;">
+		<strong>Rows per page:</strong>
+		<select id="pageSize" style="margin-left:10px;">
+			<option value="10">10</option>
+			<option value="20">20</option>
+			<option value="50" selected>50</option>
+			<option value="100">100</option>
+			<option value="250">250</option>
+			<option value="500">500</option>
+			<option value="0">All</option>
+		</select>
+	</td>
+	<td style="width:99%;"></td> <!-- Spacer -->
+</tr>
+
+<!-- Der Rest bleibt unverändert -->
+<!-- 2. ROW: Search in column + input field -->
+<tr>
+	<td colspan="4" style="padding-top:10px; white-space:nowrap;">
+		<strong>Search in column:</strong>
+		<select id="searchColumn" style="margin-left:10px; width:200px;">
+			<option value="-1">All columns</option>
+		</select>
+		<input type="text" id="search" style="margin-left:10px; width:380px;" placeholder="e.g. 443, 192.168, tcp..." />
+	</td>
+</tr>
+
+<!-- 3. ROW: Buttons + Status + Entry count + Time -->
+<tr>
+	<td colspan="4" style="padding-top:8px; white-space:nowrap;">
+		<input type="button" id="manualRefresh" value="Refresh now" />
+		<input type="button" id="exportCsv" value="Export CSV" style="margin-left:8px;" />
+
+		<span id="status" style="margin-left:20px; font-weight:bold; min-width:180px; display:inline-block;">
+			Loading...
+		</span>
+
+		<span id="entryCount" style="margin-left:20px; font-weight:bold;">
+			0 entries
+		</span>
+
+		<span id="lastUpdated" style="margin-left:20px; font-style:italic;">
+			updated at 00:00:00
+		</span>
+	</td>
+</tr>
+
+<!-- 4. ROW: Checkbox -->
+<tr>
+	<td colspan="4" style="text-align:left; padding:10px 0 8px 0;">
+		<label style="font-weight:bold; cursor:pointer; user-select:none;">
+			<input type="checkbox" id="resolveDns" style="vertical-align:middle;"> Show provider names & flags
+		</label>
+	</td>
+</tr>
+
+<!-- Pagination -->
+<tr>
+	<td colspan="4" align="center">
+		<div id="pagination" style="margin-top:10px; font-weight:bold;"></div>
+	</td>
+</tr>
+
+</table>
 };
+
 &Header::closebox();
 print "<div id='tablecontainer'></div>";
 print "<script src='/include/jquery.js'></script>";
